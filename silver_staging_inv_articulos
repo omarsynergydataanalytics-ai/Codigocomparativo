@@ -1,0 +1,152 @@
+import boto3
+import os
+import time
+import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv(dotenv_path=r"C:\Users\omarc\Downloads\AWS\.env")
+
+AWS_KEY    = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_REGION = "us-east-2"
+
+ATHENA_DB     = "cobeca_lakehouse_dev_staging_db"
+ATHENA_OUTPUT = "s3://cobeca-lakehouse-dev-lakehouse-s3/athena-results/"
+TABLA         = "stg_aps_db__inv_articulos"
+CLAVE         = "id"
+
+COLS_MAYUSCULAS = [
+    "cod_barra_principal", "descripcion", "tipo_material",
+    "grupo_material", "categoria", "subcategoria",
+    "departamento", "marca", "codigo_proveedor",
+    "nombre_proveedor", "codigo_proveedor_interno", "indexacion",
+    "capacidad", "concentracion", "presentacion",
+    "codigo_componente", "componente", "codigo_clase_terapeutica",
+    "clase_terapeutica", "origen", "paciente",
+    "tratamiento", "grupo_compra", "denominacion_grupo_compra"
+]
+
+COLS_TRIM = COLS_MAYUSCULAS
+
+COLS_REPORTE = ["id", "codigo_articulo", "descripcion", "marca", "tipo_material"]
+
+# ──────────────────────────────────────────────
+# CONEXIÓN ATHENA
+# ──────────────────────────────────────────────
+athena = boto3.client(
+    "athena",
+    aws_access_key_id=AWS_KEY,
+    aws_secret_access_key=AWS_SECRET,
+    region_name=AWS_REGION
+)
+
+def ejecutar_query(sql):
+    response = athena.start_query_execution(
+        QueryString=sql,
+        QueryExecutionContext={"Database": ATHENA_DB},
+        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT}
+    )
+    query_id = response["QueryExecutionId"]
+
+    while True:
+        estado = athena.get_query_execution(QueryExecutionId=query_id)
+        status = estado["QueryExecution"]["Status"]["State"]
+        if status in ["SUCCEEDED", "FAILED", "CANCELLED"]:
+            break
+        time.sleep(1)
+
+    if status != "SUCCEEDED":
+        reason = estado["QueryExecution"]["Status"].get("StateChangeReason", "")
+        raise Exception(f"Query falló: {reason}")
+
+    results  = athena.get_query_results(QueryExecutionId=query_id)
+    rows     = results["ResultSet"]["Rows"]
+    headers  = [col["VarCharValue"] for col in rows[0]["Data"]]
+    data     = [[col.get("VarCharValue", "") for col in row["Data"]] for row in rows[1:]]
+    return pd.DataFrame(data, columns=headers)
+
+# ──────────────────────────────────────────────
+# VALIDACIONES
+# ──────────────────────────────────────────────
+print("="*60)
+print(f"🔍  VALIDANDO STAGING: {TABLA}")
+print("="*60)
+
+errores_totales = 0
+
+# ── 1. MAYÚSCULAS ──
+print("\n📋  REGLA 1 — Textos en mayúsculas")
+print(f"    Columnas: {', '.join(COLS_MAYUSCULAS)}")
+print("-"*60)
+
+condicion_mayus = " OR ".join([f"{c} != UPPER({c})" for c in COLS_MAYUSCULAS])
+sql_mayus = f"""
+    SELECT {', '.join(COLS_REPORTE)}
+    FROM {TABLA}
+    WHERE {condicion_mayus}
+"""
+
+try:
+    df_mayus = ejecutar_query(sql_mayus)
+    if df_mayus.empty:
+        print("✅ Todas las columnas están en mayúsculas")
+    else:
+        print(f"⚠️  {len(df_mayus):,} registros con texto NO en mayúsculas:")
+        print(df_mayus.to_string(index=False))
+        errores_totales += len(df_mayus)
+except Exception as e:
+    print(f"❌ Error: {e}")
+
+# ── 2. ESPACIOS EN BLANCO ──
+print("\n📋  REGLA 2 — Sin espacios al inicio o final")
+print(f"    Columnas: {', '.join(COLS_TRIM)}")
+print("-"*60)
+
+condicion_trim = " OR ".join([f"{c} != TRIM({c})" for c in COLS_TRIM])
+sql_trim = f"""
+    SELECT {', '.join(COLS_REPORTE)}
+    FROM {TABLA}
+    WHERE {condicion_trim}
+"""
+
+try:
+    df_trim = ejecutar_query(sql_trim)
+    if df_trim.empty:
+        print("✅ Sin espacios en blanco al inicio o final")
+    else:
+        print(f"⚠️  {len(df_trim):,} registros con espacios:")
+        print(df_trim.to_string(index=False))
+        errores_totales += len(df_trim)
+except Exception as e:
+    print(f"❌ Error: {e}")
+
+# ── 3. DUPLICADOS ──
+print("\n📋  REGLA 3 — Sin duplicados")
+print("-"*60)
+
+sql_dups = f"""
+    SELECT {CLAVE}, COUNT(*) as veces
+    FROM {TABLA}
+    GROUP BY {CLAVE}
+    HAVING COUNT(*) > 1
+"""
+
+try:
+    df_dups = ejecutar_query(sql_dups)
+    if df_dups.empty:
+        print("✅ Sin duplicados")
+    else:
+        print(f"⚠️  {len(df_dups):,} claves duplicadas:")
+        print(df_dups.to_string(index=False))
+        errores_totales += len(df_dups)
+except Exception as e:
+    print(f"❌ Error: {e}")
+
+# ── RESUMEN ──
+print("\n" + "="*60)
+print("📊  RESUMEN FINAL")
+print("="*60)
+if errores_totales == 0:
+    print(f"✅ {TABLA} cumple todas las reglas de calidad")
+else:
+    print(f"⚠️  {TABLA} tiene {errores_totales:,} registros con problemas")
