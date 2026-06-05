@@ -1,0 +1,12 @@
+﻿Tabla,Columna,Diferencias,Total,% Match,Estado
+Compras (APS),codigoproveedor,0,500,100.0,OK
+Compras (APS),empresaid,0,500,100.0,OK
+Compras (APS),montototal,500,500,0.0,DIFERENCIA
+Compras (APS),nombreproveedor,0,500,100.0,OK
+Compras (APS),numerofactura,0,500,100.0,OK
+Compras (APS),referencia,500,500,0.0,DIFERENCIA
+Compras (APS),rifproveedor,0,500,100.0,OK
+Compras (APS),subtotal,500,500,0.0,DIFERENCIA
+Compras (APS),tasafactor,165,500,67.0,DIFERENCIA
+Compras (APS),totalimpuesto,500,500,0.0,DIFERENCIA
+Compras (APS),usuarioauditor,0,500,100.0,OK

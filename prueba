@@ -1,0 +1,10 @@
+from dotenv import load_dotenv
+import os
+
+load_dotenv(dotenv_path=r"C:\Users\omarc\Downloads\AWS\.env")
+
+print("SERVER  :", os.getenv("SQL_SERVER"))
+print("PORT APS:", os.getenv("CONN_APS_PORT"))
+print("DB APS  :", os.getenv("CONN_APS_DB"))
+print("UID     :", os.getenv("SQL_UID"))
+print("PWD     :", "****" if os.getenv("SQL_PWD") else "❌ VACÍO")

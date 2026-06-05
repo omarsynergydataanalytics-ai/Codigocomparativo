@@ -1,0 +1,13 @@
+﻿Tabla,Columna,Diferencias,Total,% Match,Estado
+Ventas (APS),consolidar,0,500,100.0,OK
+Ventas (APS),empresaid,0,500,100.0,OK
+Ventas (APS),esdevolucion,0,500,100.0,OK
+Ventas (APS),identificacioncliente,0,500,100.0,OK
+Ventas (APS),idvenventasmartpharma,0,500,100.0,OK
+Ventas (APS),nombrecliente,0,500,100.0,OK
+Ventas (APS),numerodocumento,0,500,100.0,OK
+Ventas (APS),tasafactor,0,500,100.0,OK
+Ventas (APS),tipo,0,500,100.0,OK
+Ventas (APS),totalfactura,500,500,0.0,DIFERENCIA
+Ventas (APS),totalimpuesto,480,500,4.0,DIFERENCIA
+Ventas (APS),usuarioauditor,0,500,100.0,OK

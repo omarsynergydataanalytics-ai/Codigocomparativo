@@ -9,21 +9,25 @@ from botocore.config import Config
 
 load_dotenv()
 
+SQL_SERVER = os.getenv("SQL_SERVER")
+SQL_UID    = os.getenv("SQL_UID")
+SQL_PWD    = os.getenv("SQL_PWD")
+
 CONN_APS = (
     'DRIVER={ODBC Driver 17 for SQL Server};'
-    'SERVER=10.1.2.205,1438;'
-    'DATABASE=aps;'
-    'UID=Lp_pando;'
-    'PWD=P@nDoL@b2026$**;'
+    f'SERVER={SQL_SERVER},{os.getenv("CONN_APS_PORT")};'
+    f'DATABASE={os.getenv("CONN_APS_DB")};'
+    f'UID={SQL_UID};'
+    f'PWD={SQL_PWD};'
     'TrustServerCertificate=yes;'
 )
 
 CONN_BI = (
     'DRIVER={ODBC Driver 17 for SQL Server};'
-    'SERVER=10.1.2.205,1439;'
-    'DATABASE=VentasBI;'
-    'UID=Lp_pando;'
-    'PWD=P@nDoL@b2026$**;'
+    f'SERVER={SQL_SERVER},{os.getenv("CONN_BI_PORT")};'
+    f'DATABASE={os.getenv("CONN_BI_DB")};'
+    f'UID={SQL_UID};'
+    f'PWD={SQL_PWD};'
     'TrustServerCertificate=yes;'
 )
 
