@@ -1,0 +1,307 @@
+import pyodbc
+import pandas as pd
+import boto3
+import io
+import pyarrow.parquet as pq
+import os
+from dotenv import load_dotenv
+from botocore.config import Config
+
+load_dotenv()
+
+SQL_SERVER = os.getenv("SQL_SERVER")
+SQL_UID    = os.getenv("SQL_UID")
+SQL_PWD    = os.getenv("SQL_PWD")
+
+CONN_APS = (
+    'DRIVER={ODBC Driver 17 for SQL Server};'
+    f'SERVER={SQL_SERVER},{os.getenv("CONN_APS_PORT")};'
+    f'DATABASE={os.getenv("CONN_APS_DB")};'
+    f'UID={SQL_UID};'
+    f'PWD={SQL_PWD};'
+    'TrustServerCertificate=yes;'
+)
+
+AWS_KEY    = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_REGION = "us-east-2"
+S3_BUCKET  = "cobeca-lakehouse-dev-lakehouse-s3"
+TOPIC_ARN  = "arn:aws:sns:us-east-2:671049619492:cobeca-lakehouse-dev-critical-alerts-sns"
+
+FECHA_DESDE = "2026-01-06"
+FECHA_HASTA = "2026-05-04"
+MUESTRA     = 500
+
+CFG_AJUSTE = {
+    "nombre":        "Ajuste (APS)",
+    "conn_str":      CONN_APS,
+    "tabla_sql":     "Ajuste",
+    "tabla_aws":     "aps_db_ajuste",
+    "s3_prefix":     "raw/aps_db/aps_db_ajuste/",
+    "clave":         "EmpresaId",
+    "col_fecha":     "FechaCreacion",
+    "col_fecha_aws": "fechacreacion",
+}
+
+# ── AWS ──
+print("Conectando a AWS...")
+boto_config = Config(read_timeout=300, connect_timeout=60, retries={"max_attempts": 3})
+
+s3 = boto3.client(
+    "s3",
+    aws_access_key_id=AWS_KEY,
+    aws_secret_access_key=AWS_SECRET,
+    region_name=AWS_REGION,
+    config=boto_config
+)
+sns = boto3.client(
+    "sns",
+    aws_access_key_id=AWS_KEY,
+    aws_secret_access_key=AWS_SECRET,
+    region_name=AWS_REGION
+)
+print("✅ AWS conectado\n")
+
+# ── DIAGNÓSTICO DE VARIABLES ──
+print("🔍 Variables de entorno APS:")
+print(f"   CONN_APS_PORT : {os.getenv('CONN_APS_PORT')}")
+print(f"   CONN_APS_DB   : {os.getenv('CONN_APS_DB')}\n")
+
+# ── FUNCIONES ──
+def enviar_alerta(asunto, mensaje):
+    try:
+        sns.publish(TopicArn=TOPIC_ARN.strip(), Subject=asunto[:100], Message=mensaje)
+        print("📨 Alerta enviada exitosamente")
+    except Exception as e:
+        print(f"❌ Error enviando alerta SNS: {e}")
+
+def get_prefix_ultima_particion(s3_client, bucket, base_prefix):
+    prefix = base_prefix
+    for _ in range(3):
+        resp     = s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix, Delimiter="/")
+        prefixes = [p["Prefix"] for p in resp.get("CommonPrefixes", [])]
+        if not prefixes:
+            break
+        prefix = sorted(prefixes)[-1]
+    return prefix
+
+def leer_todos_parquet(s3_client, bucket, prefix, cols=None):
+    resp     = s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix)
+    archivos = [o["Key"] for o in resp.get("Contents", []) if o["Key"].endswith(".parquet")]
+    if not archivos:
+        print(f"⚠️  No se encontraron parquet en {prefix}")
+        return None
+    print(f"📦 Leyendo {len(archivos)} archivos parquet...")
+    dfs = []
+    for key in archivos:
+        print(f"   📄 {key.split('/')[-1]}")
+        obj    = s3_client.get_object(Bucket=bucket, Key=key)
+        buffer = io.BytesIO(obj["Body"].read())
+        tabla  = pq.read_table(buffer)
+        df     = tabla.to_pandas()
+        df.columns = df.columns.str.lower()
+        if cols:
+            df = df[[c for c in cols if c in df.columns]]
+        dfs.append(df)
+    df_total = pd.concat(dfs, ignore_index=True)
+    print(f"✅ Total leído: {len(df_total):,} filas (con duplicados)\n")
+    return df_total
+
+def deduplicar_aws(df, clave):
+    antes        = len(df)
+    cols_meta    = [c for c in df.columns if c.startswith('_')]
+    cols_negocio = [c for c in df.columns if c not in cols_meta]
+    df = df.drop_duplicates(subset=cols_negocio, keep="first")
+    if "_ingestion_timestamp" in df.columns:
+        df = df.sort_values("_ingestion_timestamp", ascending=False)
+        df = df.drop_duplicates(subset=[clave], keep="first")
+    despues = len(df)
+    print(f"✅ Deduplicado: {antes:,} → {despues:,} filas ({antes - despues:,} duplicados eliminados)")
+    return df
+
+def filtrar_por_fecha_aws(df, col_fecha_aws, fecha_desde, fecha_hasta):
+    if col_fecha_aws is None or col_fecha_aws not in df.columns:
+        return df
+    try:
+        df = df.copy()
+        df[col_fecha_aws] = pd.to_datetime(df[col_fecha_aws], errors="coerce")
+        if df[col_fecha_aws].dt.tz is not None:
+            df[col_fecha_aws] = df[col_fecha_aws].dt.tz_localize(None)
+        fecha_desde_dt = pd.Timestamp(fecha_desde)
+        fecha_hasta_dt = pd.Timestamp(fecha_hasta + " 23:59:59")
+        df_filtrado = df[
+            (df[col_fecha_aws] >= fecha_desde_dt) &
+            (df[col_fecha_aws] <= fecha_hasta_dt)
+        ].copy()
+        print(f"✅ Filtro fecha AWS: {len(df):,} → {len(df_filtrado):,} filas")
+        return df_filtrado
+    except Exception as e:
+        print(f"⚠️  Error aplicando filtro de fecha en AWS: {e}")
+        return df
+
+def normalizar(series):
+    return series.astype(str).replace({"None": "", "nan": "", "NaN": "", "<NA>": ""})
+
+# ── EJECUCIÓN ──
+cfg           = CFG_AJUSTE
+clave         = cfg["clave"]
+col_fecha_aws = cfg["col_fecha_aws"]
+col_fecha     = cfg["col_fecha"]
+tabla_sql     = cfg["tabla_sql"]
+tabla_aws     = cfg["tabla_aws"]
+conn_str      = cfg["conn_str"]
+
+print("█"*60)
+print(f"  EVALUANDO: {cfg['nombre']}")
+print("█"*60)
+
+# ── LEER AWS ──
+try:
+    prefix = get_prefix_ultima_particion(s3, S3_BUCKET, cfg["s3_prefix"])
+    print(f"📅 Partición: {prefix}")
+    df_aws = leer_todos_parquet(s3, S3_BUCKET, prefix)
+
+    if df_aws is None:
+        raise Exception("No se encontraron parquet en S3")
+
+    df_aws = deduplicar_aws(df_aws, clave.lower())
+    df_aws = filtrar_por_fecha_aws(df_aws, col_fecha_aws, FECHA_DESDE, FECHA_HASTA)
+
+    cols_limpias = [c for c in df_aws.columns if not c.startswith('_') and 'ingestion' not in c]
+    df_aws    = df_aws[cols_limpias].copy()
+    total_aws = len(df_aws)
+    ids_aws   = set(df_aws[clave.lower()].dropna().astype(str).tolist())
+    print(f"✅ AWS final: {total_aws:,} filas | {len(ids_aws):,} IDs únicos")
+
+except Exception as e:
+    print(f"❌ Error leyendo AWS: {e}")
+    exit()
+
+# ── LEER SQL SERVER ──
+try:
+    conn_sql = pyodbc.connect(conn_str)
+    cursor   = conn_sql.cursor()
+
+    cursor.execute(f"SELECT COUNT(*) FROM {tabla_sql}")
+    total_sql = cursor.fetchone()[0]
+
+    cursor.execute(f"""
+        SELECT COUNT(*) FROM {tabla_sql}
+        WHERE [{col_fecha}] >= '{FECHA_DESDE}'
+          AND [{col_fecha}] <= '{FECHA_HASTA} 23:59:59'
+    """)
+    total_sql_rango = cursor.fetchone()[0]
+
+    cursor.execute(f"""
+        SELECT COLUMN_NAME, DATA_TYPE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = '{tabla_sql}'
+        ORDER BY ORDINAL_POSITION
+    """)
+    schema_sql = {row[0]: row[1] for row in cursor.fetchall()}
+    cursor.close()
+
+    print(f"✅ SQL Server total : {total_sql:,} filas")
+    print(f"✅ SQL Server rango : {total_sql_rango:,} filas")
+
+except Exception as e:
+    print(f"❌ Error conectando a SQL Server: {e}")
+    exit()
+
+# ── COMPARACIÓN ──
+diff_filas = abs(total_sql_rango - total_aws)
+print(f"\n{'Métrica':<30} {'SQL (rango)':>12} {'AWS (dedup)':>12}")
+print("-"*55)
+print(f"{'Total filas':<30} {total_sql_rango:>12,} {total_aws:>12,}")
+print(f"{'IDs únicos AWS':<30} {'':>12} {len(ids_aws):>12,}")
+print(f"{'Diferencia':<30} {diff_filas:>12,}")
+
+# ── VERIFICACIÓN IDs ──
+total_encontrados = 0
+ids_list = list(ids_aws)
+cur2 = conn_sql.cursor()
+for i in range(0, len(ids_list), 5000):
+    bloque  = ids_list[i:i+5000]
+    ids_str = ','.join(str(x) for x in bloque)
+    cur2.execute(f"SELECT COUNT(*) FROM {tabla_sql} WHERE [{clave}] IN ({ids_str})")
+    total_encontrados += cur2.fetchone()[0]
+cur2.close()
+
+ids_huerfanos = len(ids_aws) - total_encontrados
+print(f"\nIDs en AWS         : {len(ids_aws):,}")
+print(f"IDs en SQL Server  : {total_encontrados:,}")
+print(f"IDs sin match      : {ids_huerfanos:,}")
+
+# ── COMPARACIÓN DE VALORES ──
+print(f"\n🔬 Comparando valores (muestra {MUESTRA} registros)...")
+df_muestra_aws = df_aws.head(MUESTRA).copy()
+sql_col_map    = {k.lower(): k for k in schema_sql.keys()}
+cols_comunes   = sorted([
+    c for c in df_aws.columns
+    if c in sql_col_map and c != clave.lower() and "fecha" not in c.lower()
+])
+
+ids_muestra = df_muestra_aws[clave.lower()].tolist()
+
+select_parts = [f"t.[{clave}]"]
+for c in cols_comunes:
+    original = sql_col_map[c]
+    tipo     = schema_sql[original]
+    if tipo == 'datetimeoffset':
+        select_parts.append(f"CAST([{original}] AS NVARCHAR(50)) AS [{original}]")
+    else:
+        select_parts.append(f"[{original}]")
+
+# ── Tabla temporal para evitar full scan ──
+cursor4 = conn_sql.cursor()
+cursor4.execute("CREATE TABLE #ids_muestra (EmpresaId NVARCHAR(100))")
+
+for i in range(0, len(ids_muestra), 1000):
+    bloque  = ids_muestra[i:i+1000]
+    valores = ','.join(f"('{x}')" for x in bloque)
+    cursor4.execute(f"INSERT INTO #ids_muestra VALUES {valores}")
+
+cursor4.execute(f"""
+    SELECT {', '.join(select_parts)}
+    FROM {tabla_sql} t
+    INNER JOIN #ids_muestra tmp ON t.[{clave}] = tmp.EmpresaId
+    WHERE t.[{col_fecha}] >= '{FECHA_DESDE}'
+      AND t.[{col_fecha}] <= '{FECHA_HASTA} 23:59:59'
+""")
+filas_sql4   = cursor4.fetchall()
+nombres_sql4 = [col[0] for col in cursor4.description]
+cursor4.execute("DROP TABLE #ids_muestra")
+cursor4.close()
+conn_sql.close()
+
+df_muestra_sql = pd.DataFrame.from_records(filas_sql4, columns=nombres_sql4)
+df_muestra_sql.columns = df_muestra_sql.columns.str.lower()
+df_muestra_sql[clave.lower()] = df_muestra_sql[clave.lower()].astype(str)
+df_muestra_aws[clave.lower()] = df_muestra_aws[clave.lower()].astype(str)
+
+df_merge          = df_muestra_sql.merge(df_muestra_aws, on=clave.lower(), suffixes=('_sql', '_aws'))
+diferencias_total = 0
+resumen_cols      = []
+
+print(f"\n{'Columna':<35} {'Diffs':>8} {'% Match':>10}")
+print("-"*55)
+for col in cols_comunes:
+    col_sql = f"{col}_sql"
+    col_aws = f"{col}_aws"
+    if col_sql in df_merge.columns and col_aws in df_merge.columns:
+        diff  = (normalizar(df_merge[col_sql]) != normalizar(df_merge[col_aws])).sum()
+        total = len(df_merge)
+        pct   = round((1 - diff/total)*100, 2) if total > 0 else 100
+        diferencias_total += diff
+        estado = "✅" if diff == 0 else "⚠️ "
+        print(f"{estado} {col:<33} {diff:>8,} {pct:>9}%")
+        resumen_cols.append({
+            "Tabla": cfg["nombre"], "Columna": col,
+            "Diferencias": diff, "Total": total,
+            "% Match": pct, "Estado": "OK" if diff == 0 else "DIFERENCIA"
+        })
+
+print(f"\nTOTAL diferencias columnas: {diferencias_total:,}")
+pd.DataFrame(resumen_cols).to_csv("comparacion_aps_db_ajuste.csv", index=False, encoding="utf-8-sig")
+print("📁 Exportado: comparacion_aps_db_ajuste.csv")
+print("\n✅ Validación Ajuste finalizada.")

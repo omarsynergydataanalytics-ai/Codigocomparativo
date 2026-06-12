@@ -1,0 +1,17 @@
+﻿Tabla,Columna,Diferencias,Total,% Match,Estado
+Ajuste (APS),auditoriausuarioexterno,6391864,6989871,8.56,DIFERENCIA
+Ajuste (APS),cantidad,3053989,6989871,56.31,DIFERENCIA
+Ajuste (APS),codigoarticulo,6953669,6989871,0.52,DIFERENCIA
+Ajuste (APS),costototal,6989871,6989871,0.0,DIFERENCIA
+Ajuste (APS),costounitario,6989871,6989871,0.0,DIFERENCIA
+Ajuste (APS),documentoorigen,6987917,6989871,0.03,DIFERENCIA
+Ajuste (APS),id,6989762,6989871,0.0,DIFERENCIA
+Ajuste (APS),idsmart,6989762,6989871,0.0,DIFERENCIA
+Ajuste (APS),invalmacenid,3914656,6989871,44.0,DIFERENCIA
+Ajuste (APS),invarticulofciaid,6953704,6989871,0.52,DIFERENCIA
+Ajuste (APS),invcausaid,3320416,6989871,52.5,DIFERENCIA
+Ajuste (APS),invloteid,6963143,6989871,0.38,DIFERENCIA
+Ajuste (APS),origenmovimiento,4267985,6989871,38.94,DIFERENCIA
+Ajuste (APS),origenmovimientot,4267985,6989871,38.94,DIFERENCIA
+Ajuste (APS),tipomovimiento,2061519,6989871,70.51,DIFERENCIA
+Ajuste (APS),tipomovimientot,2061519,6989871,70.51,DIFERENCIA
